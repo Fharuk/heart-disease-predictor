@@ -14,10 +14,11 @@ st.set_page_config(page_title="Heart Disease Prediction", layout="centered")
 # -------------------------------------------------------------------------------------------------
 @st.cache_resource
 def load_artifacts():
+    """
+    Load only the functioning XGBoost model and scaler.
+    """
     artifacts = {}
     files = {
-        "rf_model": "rf_model_subset_A.pkl",
-        "scaler_A": "scaler_subset_A.pkl",
         "xgb_model": "xgb_model_subset_B.pkl",
         "scaler_B": "scaler_subset_B.pkl"
     }
@@ -28,10 +29,10 @@ def load_artifacts():
                 with open(path, "rb") as f:
                     artifacts[name] = pickle.load(f)
             except Exception as e:
-                # We log the error but don't stop the app
-                print(f"Failed to load {name}: {e}")
+                st.error(f"⚠️ Error loading {path}: {e}")
                 artifacts[name] = None
         else:
+            st.error(f"⚠️ Critical File Missing: {path}")
             artifacts[name] = None
             
     return artifacts
@@ -39,110 +40,89 @@ def load_artifacts():
 artifacts = load_artifacts()
 
 # -------------------------------------------------------------------------------------------------
-# HELPER: DYNAMIC ALIGNMENT
-# -------------------------------------------------------------------------------------------------
-def get_clean_input(input_df, model):
-    """
-    Attempts to align data. If model has no feature list (old version),
-    we convert to numpy array to bypass name checks, but this is risky.
-    """
-    if hasattr(model, "feature_names_in_"):
-        return input_df.reindex(columns=model.feature_names_in_, fill_value=0)
-    else:
-        # Fallback for old models: 
-        # We cannot guess columns. We return None to signal "Unsafe".
-        return None
-
-# -------------------------------------------------------------------------------------------------
 # UI & INPUTS
 # -------------------------------------------------------------------------------------------------
-st.title("❤️ Heart Disease Prediction App")
-st.markdown("Predicts likelihood using **XGBoost** (Primary) and **Random Forest** (Legacy).")
+st.title("❤️ Heart Disease Risk Assessment")
+st.markdown("Professional assessment tool powered by **XGBoost (Gradient Boosting)**.")
 
-st.sidebar.header("📝 Patient Vitals")
+with st.form("patient_data"):
+    st.subheader("Patient Vitals")
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        age = st.number_input("Age", 18, 100, 45)
+        sex = st.selectbox("Sex", [0, 1], format_func=lambda x: "Male" if x == 1 else "Female")
+        cp = st.slider("Chest Pain Type", 0, 3, 1, help="0: Typical Angina, 1: Atypical, 2: Non-anginal, 3: Asymptomatic")
+        trestbps = st.number_input("Resting BP (mm Hg)", 80, 200, 120)
+        chol = st.number_input("Cholesterol (mg/dl)", 100, 600, 200)
+        fbs = st.selectbox("Fasting BS > 120 mg/dl", [0, 1], format_func=lambda x: "True" if x == 1 else "False")
+        restecg = st.slider("Resting ECG Results", 0, 2, 1)
 
-# Collect inputs
-input_dict = {
-    "age": st.sidebar.number_input("Age", 18, 100, 45),
-    "sex": st.sidebar.selectbox("Sex (1=Male, 0=Female)", [0, 1], index=1),
-    "cp": st.sidebar.slider("Chest Pain Type", 0, 3, 1),
-    "trestbps": st.sidebar.number_input("Resting BP", 80, 200, 120),
-    "chol": st.sidebar.number_input("Cholesterol", 100, 400, 200),
-    "fbs": st.sidebar.selectbox("Fasting BS > 120", [0, 1]),
-    "restecg": st.sidebar.slider("Resting ECG", 0, 2, 1),
-    "thalach": st.sidebar.number_input("Max Heart Rate", 60, 220, 150),
-    "exang": st.sidebar.selectbox("Exercise Angina", [0, 1]),
-    "oldpeak": st.sidebar.number_input("ST Depression", 0.0, 6.0, 1.0, step=0.1),
-    "slope": st.sidebar.slider("Slope", 0, 2, 1),
-    "ca": st.sidebar.slider("Major Vessels", 0, 4, 0),
-    "thal": st.sidebar.slider("Thalassemia", 0, 3, 2),
-    "smoking": st.sidebar.selectbox("Smoking", [0, 1]),
-    "diabetes": st.sidebar.selectbox("Diabetes", [0, 1]),
-    "bmi": st.sidebar.slider("BMI", 10.0, 50.0, 25.0)
-}
+    with col2:
+        thalach = st.number_input("Max Heart Rate", 60, 220, 150)
+        exang = st.selectbox("Exercise Induced Angina", [0, 1], format_func=lambda x: "Yes" if x == 1 else "No")
+        oldpeak = st.number_input("ST Depression", 0.0, 6.0, 1.0, step=0.1)
+        slope = st.slider("Slope of Peak Exercise", 0, 2, 1)
+        ca = st.slider("Major Vessels Colored (0-4)", 0, 4, 0)
+        thal = st.slider("Thalassemia", 0, 3, 2, help="0: Normal, 1: Fixed Defect, 2: Reversable Defect")
+        
+    st.subheader("Lifestyle Factors")
+    col3, col4, col5 = st.columns(3)
+    with col3:
+        smoking = st.selectbox("Smoker", [0, 1], format_func=lambda x: "Yes" if x == 1 else "No")
+    with col4:
+        diabetes = st.selectbox("Diabetic", [0, 1], format_func=lambda x: "Yes" if x == 1 else "No")
+    with col5:
+        bmi = st.number_input("BMI", 10.0, 50.0, 25.0, step=0.1)
 
-input_df = pd.DataFrame([input_dict])
+    submit_button = st.form_submit_button("🔍 Run Analysis", type="primary")
 
 # -------------------------------------------------------------------------------------------------
 # PREDICTION LOGIC
 # -------------------------------------------------------------------------------------------------
-if st.button("🔍 Analyze Risk"):
-    st.subheader("Results")
-    
-    # --- XGBoost (The Reliable One) ---
+if submit_button:
     xgb_model = artifacts["xgb_model"]
     scaler_B = artifacts["scaler_B"]
     
     if xgb_model and scaler_B:
         try:
-            # XGBoost usually has feature names, so we try alignment
+            # Prepare Input Dictionary
+            input_dict = {
+                "age": age, "sex": sex, "cp": cp, "trestbps": trestbps, "chol": chol,
+                "fbs": fbs, "restecg": restecg, "thalach": thalach, "exang": exang,
+                "oldpeak": oldpeak, "slope": slope, "ca": ca, "thal": thal,
+                "smoking": smoking, "diabetes": diabetes, "bmi": bmi
+            }
+            input_df = pd.DataFrame([input_dict])
+
+            # Align Features for XGBoost
+            # If model has saved features, use them. If not, use the standard Subset B list.
             if hasattr(xgb_model, "feature_names_in_"):
-                input_B = input_df.reindex(columns=xgb_model.feature_names_in_, fill_value=0)
+                aligned_df = input_df.reindex(columns=xgb_model.feature_names_in_, fill_value=0)
             else:
-                # If XGBoost is also old, we try passing all features (risky but might work)
-                # But based on logs, XGBoost was working with the previous code.
-                # We will define the list explicitly based on your original code:
+                # Fallback based on your successful test earlier
                 cols_B = ["age", "sex", "cp", "trestbps", "chol", "thalach", "exang", 
                           "oldpeak", "slope", "ca", "thal", "smoking", "diabetes", "bmi"]
-                input_B = input_df[cols_B]
+                aligned_df = input_df[cols_B]
 
-            scaled_B = scaler_B.transform(input_B)
-            prob_B = xgb_model.predict_proba(scaled_B)[0][1]
-            pred_B = xgb_model.predict(scaled_B)[0]
-            
-            color = "red" if pred_B == 1 else "green"
-            st.markdown(f"### ✅ XGBoost Prediction")
-            st.markdown(f"**Result:** :{color}[{'Heart Disease' if pred_B==1 else 'Normal'}]")
-            st.markdown(f"**Probability:** {prob_B:.2%}")
-            
-        except Exception as e:
-            st.error(f"XGBoost Error: {e}")
-    else:
-        st.error("XGBoost model file not found.")
+            # Scale and Predict
+            scaled_input = scaler_B.transform(aligned_df)
+            prediction = xgb_model.predict(scaled_input)[0]
+            probability = xgb_model.predict_proba(scaled_input)[0][1]
 
-    st.markdown("---")
-
-    # --- Random Forest (The Broken One) ---
-    rf_model = artifacts["rf_model"]
-    scaler_A = artifacts["scaler_A"]
-    
-    if rf_model and scaler_A:
-        try:
-            # We attempt to guess the columns since feature_names_in_ is missing
-            # Based on your error logs, it rejected 'fbs', 'restecg', 'slope', 'bmi', 'diabetes'
-            # This implies a very small subset.
-            # We will try to pass a standard subset, BUT if it fails, we catch it.
+            # Display Results
+            st.divider()
+            st.subheader("Assessment Result")
             
-            if hasattr(rf_model, "feature_names_in_"):
-                input_A = input_df.reindex(columns=rf_model.feature_names_in_, fill_value=0)
-                scaled_A = scaler_A.transform(input_A)
-                prob_A = rf_model.predict_proba(scaled_A)[0][1]
-                st.write(f"Random Forest Risk: {prob_A:.2%}")
+            if prediction == 1:
+                st.error(f"### High Risk Detected")
+                st.markdown(f"**Probability:** {probability:.1%}")
+                st.warning("Please consult a cardiologist for further evaluation.")
             else:
-                st.warning("⚠️ Random Forest model is undergoing maintenance (Version Mismatch).")
-                
+                st.success(f"### Low Risk Detected")
+                st.markdown(f"**Probability:** {probability:.1%}")
+                st.info("Maintain a healthy lifestyle to keep risk low.")
+
         except Exception as e:
-            # Silent fail - don't show user the ugly error
-            st.warning("⚠️ Random Forest model temporarily unavailable.")
-            with st.expander("Developer Logs"):
-                st.write(str(e))
+            st.error(f"Analysis Error: {str(e)}")
+            st.info("Please verify that all inputs are within valid ranges.")
